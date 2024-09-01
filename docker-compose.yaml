@@ -1,0 +1,102 @@
+networks:
+  zabbix-network:
+    name: zabbix-network
+    driver: bridge
+
+services:
+  mariadb:
+    image: mariadb:${MARIADB_VERSION}
+    restart: always
+    networks:
+      - zabbix-network
+    ports:
+      - '3306:3306'
+    volumes:
+      - './mariadb/data:/var/lib/mysql:Z'
+      - './mariadb/conf.d:/etc/mysql/conf.d:ro'
+    environment:
+      - MARIADB_ROOT_PASSWORD=${MARIADB_ROOT_PASSWORD}
+      - MARIADB_DATABASE=${MARIADB_DATABASE:-zabbix}
+      - MARIADB_USER=${MARIADB_USER:-zabbix}
+      - MARIADB_PASSWORD=${MARIADB_PASSWORD}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "healthcheck.sh",
+          "--connect",
+          "--innodb_initialized"
+        ]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  zabbix-server:
+    image: zabbix/zabbix-server-mysql:${ZABBIX_VERSION}
+    networks:
+      - zabbix-network
+    links:
+      - mariadb
+    restart: always
+    ports:
+      - '10051:10051/tcp'
+    volumes:
+      - ./zabbix/externalscripts:/usr/lib/zabbix/externalscripts:ro
+      - ./zabbix/modules:/var/lib/zabbix/modules:ro
+      - ./zabbix/enc:/var/lib/zabbix/enc:ro
+      - ./zabbix/ssh_keys:/var/lib/zabbix/ssh_keys:ro
+      - ./zabbix/mibs:/var/lib/zabbix/mibs:ro
+      - ./zabbix/logs:/var/log/zabbix:rw
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    tmpfs: /tmp
+    sysctls:
+      - net.ipv4.ip_local_port_range=1024 64999
+      - net.ipv4.conf.all.accept_redirects=0
+      - net.ipv4.conf.all.secure_redirects=0
+      - net.ipv4.conf.all.send_redirects=0
+    environment:
+      - DB_SERVER_HOST=mariadb
+      - MYSQL_DATABASE=${MARIADB_DATABASE:-zabbix}
+      - MYSQL_USER=${MARIADB_USER:-zabbix}
+      - MYSQL_PASSWORD=${MARIADB_PASSWORD}
+      - ZBX_NODEADDRESS=zabbix-server
+      - PHP_TZ=${TIMEZONE:-Asia/Taipei}
+      - ZBX_CACHESIZE=${ZBX_CACHESIZE:-128M}
+      - ZBX_STARTBROWSERPOLLERS=${ZBX_STARTBROWSERPOLLERS:-10}
+      - ZBX_STARTDISCOVERERS=${ZBX_STARTDISCOVERERS:-5}
+      - ZBX_STARTPOLLERS=${ZBX_STARTPOLLERS:-10}
+    depends_on:
+      - mariadb
+
+  zabbix-frontend:
+    image: zabbix/zabbix-web-nginx-mysql:${ZABBIX_VERSION}
+    networks:
+      - zabbix-network
+    links:
+      - mariadb
+    restart: always
+    ports:
+      - '${ZABBIX_HTTP_PORT:-80}:8080'
+      - '${ZABBIX_HTTPS_PORT:-443}:8443'
+    volumes:
+      - ./frontend/conf:/usr/share/zabbix/conf
+    environment:
+      - DB_SERVER_HOST=mariadb
+      - MYSQL_DATABASE=${MARIADB_DATABASE:-zabbix}
+      - MYSQL_USER=${MARIADB_USER:-zabbix}
+      - MYSQL_PASSWORD=${MARIADB_PASSWORD}
+      - PHP_TZ=${TIMEZONE:-Asia/Taipei}
+    depends_on:
+      - mariadb
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    networks:
+      - zabbix-network
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run
+    depends_on:
+      - zabbix-frontend
